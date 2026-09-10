@@ -5,11 +5,9 @@ const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 中间件
 app.use(cors());
 app.use(express.json());
 
-// ========== 你的数据库连接池（保持你原来的配置不变，这里用环境变量） ==========
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
@@ -17,26 +15,36 @@ const pool = new Pool({
   }
 });
 
-// ========== 新增：启动自动建表逻辑 ==========
-const initTable = async () => {
-  const sql = `
-  CREATE TABLE IF NOT EXISTS messages (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(100) NOT NULL,
-    content TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  );
-  `;
+// 初始化数据库
+async function bootstrap() {
   try {
-    await pool.query(sql);
-    console.log("✅ messages 表初始化完成");
-  } catch (err) {
-    console.error("❌ 建表失败：", err);
-  }
-};
-initTable();
+    // 测试数据库连通
+    await pool.query('SELECT 1');
+    console.log("✅ 数据库连接成功");
 
-// ========== 留言接口 ==========
+    // 创建messages表
+    const createTableSql = `
+    CREATE TABLE IF NOT EXISTS messages (
+      id SERIAL PRIMARY KEY,
+      name VARCHAR(100) NOT NULL,
+      content TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    `;
+    await pool.query(createTableSql);
+    console.log("✅ messages表创建/校验完成");
+
+    // 全部就绪，才启动服务
+    app.listen(PORT, () => {
+      console.log(`🚀 服务启动，端口：${PORT}`);
+    });
+
+  } catch (err) {
+    console.error("❌ 启动失败：", err);
+    process.exit(1);
+  }
+}
+
 // 获取全部留言
 app.get('/api/messages', async (req, res) => {
   try {
@@ -65,6 +73,4 @@ app.get('/', (req, res) => {
   res.send('留言API服务正常运行');
 });
 
-app.listen(PORT, () => {
-  console.log(`服务启动，端口：${PORT}`);
-});
+bootstrap();
