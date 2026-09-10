@@ -5,6 +5,19 @@ const { Pool } = require('pg');
 const app = express();
 const port = process.env.PORT || 3000;
 
+app.get('/health', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT NOW()');
+    res.json({
+      ok: true,
+      time: result.rows[0].now,
+      msg: "数据库连接成功"
+    });
+  } catch (err) {
+    res.status(500).json({ok:false, error: err.message})
+  }
+});
+
 app.use(cors());
 app.use(express.json());
 
