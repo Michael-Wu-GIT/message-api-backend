@@ -1,10 +1,20 @@
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
-
 const app = express();
 const port = process.env.PORT || 3000;
 
+// ========== 1. 先初始化数据库连接池（放到最前面！）==========
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+// ========== 2. 注册中间件 ==========
+app.use(cors());
+app.use(express.json());
+
+// ========== 3. 健康检查接口 ==========
 app.get('/health', async (req, res) => {
   try {
     const result = await pool.query('SELECT NOW()');
@@ -18,14 +28,7 @@ app.get('/health', async (req, res) => {
   }
 });
 
-app.use(cors());
-app.use(express.json());
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
-
+// ========== 4. 业务路由 ==========
 // 获取所有留言
 app.get('/api/messages', async (req, res) => {
   try {
@@ -51,6 +54,7 @@ app.post('/api/messages', async (req, res) => {
   }
 });
 
+// ========== 5. 最后监听端口 ==========
 app.listen(port, () => {
   console.log(`API running on port ${port}`);
 });
