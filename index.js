@@ -1,6 +1,7 @@
 const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -18,11 +19,9 @@ const pool = new Pool({
 // 初始化数据库
 async function bootstrap() {
   try {
-    // 测试数据库连通
     await pool.query('SELECT 1');
     console.log("✅ 数据库连接成功");
 
-    // 创建messages表
     const createTableSql = `
     CREATE TABLE IF NOT EXISTS messages (
       id SERIAL PRIMARY KEY,
@@ -34,7 +33,6 @@ async function bootstrap() {
     await pool.query(createTableSql);
     console.log("✅ messages表创建/校验完成");
 
-    // 全部就绪，才启动服务
     app.listen(PORT, () => {
       console.log(`🚀 服务启动，端口：${PORT}`);
     });
@@ -44,6 +42,16 @@ async function bootstrap() {
     process.exit(1);
   }
 }
+
+// ========== 新增Render健康检查接口 ==========
+app.get('/health', (req, res) => {
+  res.send('ok');
+});
+
+// 首页返回留言板html页面
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'index.html'));
+});
 
 // 获取全部留言
 app.get('/api/messages', async (req, res) => {
@@ -67,10 +75,6 @@ app.post('/api/messages', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
-
-app.get('/', (req, res) => {
-  res.send('留言API服务正常运行');
 });
 
 bootstrap();
