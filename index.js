@@ -45,14 +45,24 @@ async function bootstrap() {
         AND column_name IN ('name', 'company_name')
     `);
     const columnNames = new Set(columns.rows.map(row => row.column_name));
-    legacyNameColumn = columnNames.has('name');
 
     // 兼容旧版使用 name 字段创建的 messages 表，避免历史留言丢失。
     if (columnNames.has('name') && !columnNames.has('company_name')) {
       await pool.query('ALTER TABLE messages ADD COLUMN company_name VARCHAR(100)');
       await pool.query('UPDATE messages SET company_name = name WHERE company_name IS NULL');
     }
-    if (columnNames.has('company_name')) {
+
+    const currentColumns = await pool.query(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'messages'
+        AND column_name IN ('name', 'company_name')
+    `);
+    const currentColumnNames = new Set(currentColumns.rows.map(row => row.column_name));
+    legacyNameColumn = currentColumnNames.has('name');
+
+    if (currentColumnNames.has('company_name')) {
       await pool.query('ALTER TABLE messages ALTER COLUMN company_name SET NOT NULL');
     }
 
