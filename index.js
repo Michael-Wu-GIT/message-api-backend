@@ -5,9 +5,15 @@ const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const MAX_CONTENT_LENGTH = 5000;
+let legacyNameColumn = false;
 
 app.use(cors());
 app.use(express.json());
+
+if (!process.env.DATABASE_URL) {
+  throw new Error('DATABASE_URL 未配置，服务拒绝启动');
+}
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -22,15 +28,34 @@ async function bootstrap() {
     await pool.query('SELECT 1');
     console.log("✅ 数据库连接成功");
 
-    const createTableSql = `
+    await pool.query(`
     CREATE TABLE IF NOT EXISTS messages (
       id SERIAL PRIMARY KEY,
-      name VARCHAR(100) NOT NULL,
+      company_name VARCHAR(100),
       content TEXT NOT NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
-    `;
-    await pool.query(createTableSql);
+    `);
+
+    const columns = await pool.query(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'messages'
+        AND column_name IN ('name', 'company_name')
+    `);
+    const columnNames = new Set(columns.rows.map(row => row.column_name));
+    legacyNameColumn = columnNames.has('name');
+
+    // 兼容旧版使用 name 字段创建的 messages 表，避免历史留言丢失。
+    if (columnNames.has('name') && !columnNames.has('company_name')) {
+      await pool.query('ALTER TABLE messages ADD COLUMN company_name VARCHAR(100)');
+      await pool.query('UPDATE messages SET company_name = name WHERE company_name IS NULL');
+    }
+    if (columnNames.has('company_name')) {
+      await pool.query('ALTER TABLE messages ALTER COLUMN company_name SET NOT NULL');
+    }
+
     console.log("✅ messages表创建/校验完成");
 
     app.listen(PORT, () => {
@@ -56,24 +81,52 @@ app.get('/', (req, res) => {
 // 获取全部留言
 app.get('/api/messages', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM messages ORDER BY created_at DESC');
+    const result = await pool.query(`
+      SELECT id, company_name, content, created_at
+      FROM messages
+      ORDER BY id DESC
+    `);
     res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('获取留言失败：', err);
+    res.status(500).json({ error: '获取留言失败' });
   }
 });
 
 // 新增留言
 app.post('/api/messages', async (req, res) => {
-  const { name, content } = req.body;
+  const companyName = String(
+    req.body.companyName || req.body.company || req.body.name || ''
+  ).trim();
+  const content = String(req.body.content || '').trim();
+
+  if (!companyName || !content) {
+    res.status(400).json({ error: '公司名和留言内容不能为空' });
+    return;
+  }
+  if (companyName.length > 100 || content.length > MAX_CONTENT_LENGTH) {
+    res.status(400).json({ error: '公司名或留言内容超过长度限制' });
+    return;
+  }
+
   try {
-    const result = await pool.query(
-      'INSERT INTO messages(name, content) VALUES($1, $2) RETURNING *',
-      [name, content]
-    );
-    res.json(result.rows[0]);
+    const result = legacyNameColumn
+      ? await pool.query(
+          `INSERT INTO messages(name, company_name, content)
+           VALUES($1, $1, $2)
+           RETURNING id, company_name, content, created_at`,
+          [companyName, content]
+        )
+      : await pool.query(
+          `INSERT INTO messages(company_name, content)
+           VALUES($1, $2)
+           RETURNING id, company_name, content, created_at`,
+          [companyName, content]
+        );
+    res.status(201).json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('保存留言失败：', err);
+    res.status(500).json({ error: '留言保存失败' });
   }
 });
 
