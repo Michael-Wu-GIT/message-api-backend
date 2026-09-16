@@ -17,7 +17,7 @@ if (!process.env.DATABASE_URL) {
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: {
+  ssl: process.env.PGSSL === 'false' ? false : {
     rejectUnauthorized: false
   }
 });
@@ -37,20 +37,22 @@ async function bootstrap() {
     );
     `);
 
-    const columns = await pool.query(`
+    // 健壮迁移：兼容历史遗留表。先确认 name 列是否存在再回填，
+    // 否则纯 company_name 结构的新表会因引用不存在的列而启动失败。
+    const { rows: legacyNameRows } = await pool.query(`
       SELECT column_name
       FROM information_schema.columns
       WHERE table_schema = current_schema()
         AND table_name = 'messages'
-        AND column_name IN ('name', 'company_name')
+        AND column_name = 'name'
     `);
-    const columnNames = new Set(columns.rows.map(row => row.column_name));
-
-    // 兼容旧版使用 name 字段创建的 messages 表，避免历史留言丢失。
-    if (columnNames.has('name') && !columnNames.has('company_name')) {
-      await pool.query('ALTER TABLE messages ADD COLUMN company_name VARCHAR(100)');
-      await pool.query('UPDATE messages SET company_name = name WHERE company_name IS NULL');
+    const hasLegacyNameColumn = legacyNameRows.length > 0;
+    await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS company_name VARCHAR(100)');
+    if (hasLegacyNameColumn) {
+      await pool.query('UPDATE messages SET company_name = name WHERE company_name IS NULL AND name IS NOT NULL');
     }
+    await pool.query("UPDATE messages SET company_name = '未知' WHERE company_name IS NULL");
+    await pool.query('ALTER TABLE messages ALTER COLUMN company_name SET NOT NULL');
 
     const currentColumns = await pool.query(`
       SELECT column_name
@@ -61,10 +63,6 @@ async function bootstrap() {
     `);
     const currentColumnNames = new Set(currentColumns.rows.map(row => row.column_name));
     legacyNameColumn = currentColumnNames.has('name');
-
-    if (currentColumnNames.has('company_name')) {
-      await pool.query('ALTER TABLE messages ALTER COLUMN company_name SET NOT NULL');
-    }
 
     console.log("✅ messages表创建/校验完成");
 
@@ -120,19 +118,42 @@ app.post('/api/messages', async (req, res) => {
   }
 
   try {
-    const result = legacyNameColumn
-      ? await pool.query(
-          `INSERT INTO messages(name, company_name, content)
-           VALUES($1, $1, $2)
-           RETURNING id, company_name, content, created_at`,
-          [companyName, content]
-        )
-      : await pool.query(
-          `INSERT INTO messages(company_name, content)
-           VALUES($1, $2)
-           RETURNING id, company_name, content, created_at`,
-          [companyName, content]
-        );
+    // 动态 INSERT：按当前实际表结构构建，兼容任意历史改造过的表。
+    const { rows: columns } = await pool.query(`
+      SELECT column_name, is_nullable, column_default
+      FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'messages'
+      ORDER BY ordinal_position
+    `);
+
+    const insertColumns = [];
+    const insertValues = [];
+    for (const column of columns) {
+      if (column.column_name === 'id') continue;
+      if (column.column_name === 'company_name' || column.column_name === 'name') {
+        insertColumns.push(column.column_name);
+        insertValues.push(companyName);
+        continue;
+      }
+      if (column.column_name === 'content') {
+        insertColumns.push(column.column_name);
+        insertValues.push(content);
+        continue;
+      }
+      // 未识别的列：仅当必填且无默认值时干预，否则交给数据库默认值填
+      if (column.is_nullable === 'NO' && !column.column_default) {
+        throw new Error(`messages 表存在未知必填字段：${column.column_name}，请人工处理`);
+      }
+    }
+
+    const placeholders = insertValues.map((_, index) => `$${index + 1}`).join(', ');
+    const result = await pool.query(
+      `INSERT INTO messages (${insertColumns.join(', ')})
+       VALUES (${placeholders})
+       RETURNING id, company_name, content, created_at`,
+      insertValues
+    );
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('保存留言失败：', err);
